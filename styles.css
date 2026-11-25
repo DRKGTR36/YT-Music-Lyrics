@@ -1,5 +1,5 @@
 ytmusic-description-shelf-renderer:has(#ytm-lyric-tab-host.is-visible) > *:not(#ytm-lyric-tab-host),
-ytmusic-player-page ytmusic-section-list-renderer:has(#ytm-lyric-tab-host.is-visible) > *:not(ytmusic-description-shelf-renderer) {
+ytmusic-player-page ytmusic-section-list-renderer:has(#ytm-lyric-tab-host.is-visible) > *:not(:has(ytmusic-description-shelf-renderer)) {
   display: none !important;
 }
 
