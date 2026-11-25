@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "YTM Dual Column Lyrics",
+  "version": "2.1.0",
+  "description": "Synced lyrics with instrumental breaks, duet styling, fullscreen subtitles, and source credits for YouTube Music.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://music.youtube.com/*",
+    "https://lrclib.net/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://music.youtube.com/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
