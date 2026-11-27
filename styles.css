@@ -1,5 +1,4 @@
-ytmusic-description-shelf-renderer:has(#ytm-lyric-tab-host.is-visible) > *:not(#ytm-lyric-tab-host),
-ytmusic-player-page ytmusic-section-list-renderer:has(#ytm-lyric-tab-host.is-visible) > *:not(:has(ytmusic-description-shelf-renderer)) {
+ytmusic-description-shelf-renderer > .wrapper {
   display: none !important;
 }
 
@@ -211,10 +210,8 @@ body.ytm-fs-active-mode #player-bar-background {
   transition: opacity 0.28s ease, transform 0.28s ease;
 }
 
-body.ytm-fs-active-mode:has(ytmusic-player-bar:hover) ytmusic-player-bar,
-body.ytm-fs-active-mode:has(ytmusic-player-bar:hover) #player-bar-background,
-body.ytm-fs-active-mode:has(#ytm-fs-bottom-hover-zone:hover) ytmusic-player-bar,
-body.ytm-fs-active-mode:has(#ytm-fs-bottom-hover-zone:hover) #player-bar-background {
+body.ytm-fs-active-mode.ytm-fs-bottom-hover ytmusic-player-bar,
+body.ytm-fs-active-mode.ytm-fs-bottom-hover #player-bar-background {
   opacity: 1;
   pointer-events: auto;
 }
@@ -390,6 +387,6 @@ body.ytm-fs-active-mode:has(#ytm-fs-bottom-hover-zone:hover) #player-bar-backgro
   bottom: 0;
   height: 92px;
   z-index: 2147482999;
-  pointer-events: auto;
+  pointer-events: none;
   background: transparent;
 }

@@ -1,0 +1,60 @@
+name: Bug report
+description: Something in the extension does not work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you see, and what did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open YouTube Music and play ...
+        2. Switch to the Lyrics tab
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: track
+    attributes:
+      label: Track
+      placeholder: Title - Artist
+    validations:
+      required: true
+
+  - type: input
+    id: chrome-version
+    attributes:
+      label: Chrome version
+      placeholder: Chrome 120
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Windows 11
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console output or screenshots
+      description: Optional, but very helpful for layout and sync issues.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for this problem.
+          required: true

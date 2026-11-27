@@ -3,6 +3,8 @@
 
   const isEnabled = true;
   const MAX_VISIBLE_LINES = 7;
+  const LRCLIB_ENDPOINT = "https://lrclib.net/api/search";
+  const FETCH_RETRY_COOLDOWN_MS = 20000;
 
   let activeTrackKey = "";
   let renderedTrackKey = "";
@@ -19,6 +21,8 @@
   let boundVideoEl = null;
   let userScrolledAt = 0;
   let fsLyricsEnabled = true;
+  let autoTabDoneKey = "";
+  let autoTabRequestedKey = "";
 
   const PAUSE_CONFIG = {
     introMinGapSec: 7.0,
@@ -235,34 +239,76 @@
     return out;
   }
 
-  function extractNativeDomLyrics(shelf) {
-    if (!shelf) return [];
+  function extractNativeDomLyrics(scope) {
+    const root = scope || document;
     const selectors = [
-      "yt-formatted-string.description",
-      "#description yt-formatted-string",
       "ytmusic-lyric-renderer yt-formatted-string",
-      ".non-expandable.description"
+      "ytmusic-description-shelf-renderer yt-formatted-string.description",
+      "ytmusic-description-shelf-renderer yt-formatted-string.non-expandable",
+      "ytmusic-lyrics-renderer yt-formatted-string",
+      "#description yt-formatted-string"
     ];
 
+    let best = [];
     for (const sel of selectors) {
-      const els = shelf.querySelectorAll(sel);
+      const els = root.querySelectorAll(sel);
       for (const el of els) {
         if (el.closest("#ytm-lyric-tab-host")) continue;
         const raw = (el.textContent || "").trim();
         if (!raw) continue;
         const lines = splitPlainLyrics(raw);
         const contentCount = lines.filter(Boolean).length;
-        if (contentCount >= 2) {
-          return lines;
+        if (contentCount > best.filter(Boolean).length) {
+          best = lines;
         }
       }
     }
-    return [];
+    return best;
+  }
+
+  async function fetchLrclibCandidates(cleanTitle, cleanArtist) {
+    const params = new URLSearchParams({
+      track_name: cleanTitle,
+      artist_name: cleanArtist
+    });
+    const url = `${LRCLIB_ENDPOINT}?${params.toString()}`;
+
+    const viaBackground = await new Promise((resolve) => {
+      if (!globalThis.chrome?.runtime?.sendMessage) {
+        resolve(null);
+        return;
+      }
+      try {
+        chrome.runtime.sendMessage(
+          {
+            type: "FETCH_LRCLIB_SEARCH",
+            trackName: cleanTitle,
+            artistName: cleanArtist
+          },
+          (res) => {
+            void chrome.runtime.lastError;
+            resolve(res && res.ok ? res : null);
+          }
+        );
+      } catch {
+        resolve(null);
+      }
+    });
+
+    if (viaBackground) {
+      return Array.isArray(viaBackground.candidates) ? viaBackground.candidates : [];
+    }
+
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) throw new Error(`LRCLIB HTTP ${res.status}`);
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
   }
 
   async function fetchSyncedLyricsForTrack(key, title, artist, durationSec, shelf) {
-    if (syncedLyricsCache.has(key)) {
-      return syncedLyricsCache.get(key);
+    const cached = syncedLyricsCache.get(key);
+    if (cached && !(cached.retryable && Date.now() - cached.at > FETCH_RETRY_COOLDOWN_MS)) {
+      return cached;
     }
     if (fetchInFlightKey === key) {
       return null;
@@ -273,44 +319,16 @@
     const cleanArtist = cleanSearchArtist(artist);
 
     try {
-      const response = await new Promise((resolve) => {
-        if (!chrome?.runtime?.sendMessage) {
-          resolve({ ok: false, provider: "None", candidates: [] });
-          return;
-        }
-        chrome.runtime.sendMessage(
-          {
-            type: "FETCH_LRCLIB_SEARCH",
-            trackName: cleanTitle,
-            artistName: cleanArtist
-          },
-          (res) => {
-            if (chrome.runtime.lastError) {
-              resolve({ ok: false, provider: "None", candidates: [] });
-              return;
-            }
-            resolve(res || { ok: false, provider: "None", candidates: [] });
-          }
-        );
-      });
-
-      if (!response.ok) {
-        const empty = { synced: null, plain: [], source: "None", credits: "", at: Date.now(), retryable: true };
-        syncedLyricsCache.set(key, empty);
-        return empty;
-      }
-
-      const providerLabel = response.provider || "LRCLIB";
-      const candidates = Array.isArray(response.candidates) ? response.candidates : [];
+      const candidates = await fetchLrclibCandidates(cleanTitle, cleanArtist);
       const bestSynced = pickBestSyncedCandidate(candidates, durationSec);
       const plainSource = bestSynced || candidates.find((c) => c.plainLyrics);
       const chosenMeta = bestSynced || plainSource || null;
 
       let plainLines = splitPlainLyrics(plainSource?.plainLyrics || "");
       let source = bestSynced
-        ? `${providerLabel} (Synced)`
+        ? "LRCLIB (Synced)"
         : plainLines.filter(Boolean).length >= 2
-          ? `${providerLabel} (Plain)`
+          ? "LRCLIB (Plain)"
           : "None";
 
       if (!bestSynced && plainLines.filter(Boolean).length < 2) {
@@ -360,7 +378,7 @@
     }
   }
 
-  function isLyricsTabSelected() {
+  function findLyricsTab() {
     const tabs = document.querySelectorAll(
       "ytmusic-player-page tp-yt-paper-tab, ytmusic-player-page [role='tab']"
     );
@@ -368,10 +386,30 @@
       const tab = tabs[i];
       const txt = (tab.textContent || "").trim().toUpperCase();
       if (txt === "LIRIK" || txt === "LYRICS") {
-        return tab.getAttribute("aria-selected") === "true" || tab.hasAttribute("active");
+        return tab;
       }
     }
-    return false;
+    return null;
+  }
+
+  function isLyricsTabSelected() {
+    const tab = findLyricsTab();
+    if (!tab) return false;
+    return tab.getAttribute("aria-selected") === "true" || tab.hasAttribute("active");
+  }
+
+  function ensureLyricsTabSelected() {
+    const tab = findLyricsTab();
+    if (!tab) return false;
+    if (tab.getAttribute("aria-selected") === "true" || tab.hasAttribute("active")) {
+      return true;
+    }
+    try {
+      tab.click();
+    } catch {
+      return false;
+    }
+    return true;
   }
 
   function isPlayerFullscreen() {
@@ -383,6 +421,10 @@
 
   function syncFullscreenBodyState(active) {
     document.body.classList.toggle("ytm-fs-active-mode", Boolean(active));
+  }
+
+  function syncBottomHoverState(hovering) {
+    document.body.classList.toggle("ytm-fs-bottom-hover", Boolean(hovering));
   }
 
   function buildEstimatedTimings(lines, durationSec) {
@@ -555,11 +597,11 @@
       const child = children[i];
       if (child.id === "ytm-lyric-tab-host") continue;
       if (hideNative) {
-        if (child.style.display !== "none") {
+        if (!("ytmOrigDisplay" in child.dataset)) {
           child.dataset.ytmOrigDisplay = child.style.display || "";
           child.style.setProperty("display", "none", "important");
         }
-      } else if (child.style.display === "none" && "ytmOrigDisplay" in child.dataset) {
+      } else if ("ytmOrigDisplay" in child.dataset) {
         child.style.display = child.dataset.ytmOrigDisplay;
         delete child.dataset.ytmOrigDisplay;
       }
@@ -644,8 +686,11 @@
       });
     }
 
-    const fsRoot =
-      document.fullscreenElement || document.querySelector("ytmusic-player-page") || document.body;
+    const hoverZone = overlay.querySelector("#ytm-fs-bottom-hover-zone");
+    if (hoverZone) {
+      hoverZone.style.pointerEvents = "none";
+    }
+    const fsRoot = document.body;
     if (overlay.parentElement !== fsRoot) {
       fsRoot.appendChild(overlay);
     }
@@ -747,47 +792,47 @@
     }
   }
 
+  function updateSurfaceVisibility(fullscreenActive, tabSelected) {
+    const host = document.getElementById("ytm-lyric-tab-host");
+    const fsOverlay = document.getElementById("ytm-fs-lyrics-overlay");
+
+    const hasLyrics = lyricItems.length > 0;
+    const showFs = fullscreenActive && hasLyrics;
+    const showTab = !fullscreenActive && tabSelected && hasLyrics;
+
+    if (host) {
+      host.classList.toggle("is-visible", showTab);
+    }
+    if (fsOverlay) {
+      fsOverlay.classList.toggle("is-visible", showFs);
+    }
+    updateFsToggleUI();
+  }
+
   function renderLyricsView(forceRefresh = false) {
     if (!isEnabled) return;
 
     const host = ensureHostNode();
     const fsOverlay = ensureFullscreenOverlay();
     const fullscreenActive = isPlayerFullscreen();
-    const tabSelected = isLyricsTabSelected();
-    const shelf = tabSelected
-      ? document.querySelector("ytmusic-player-page ytmusic-description-shelf-renderer")
-      : null;
-
-    syncFullscreenBodyState(fullscreenActive);
-    fsOverlay.classList.toggle("is-visible", fullscreenActive && lyricItems.length > 0);
-
-    if (!tabSelected || !shelf) {
-      host.classList.remove("is-visible");
-      const prevParent = host.parentElement;
-      if (prevParent && prevParent !== document.body) {
-        syncShelfChildrenVisibility(prevParent, false);
-        document.body.appendChild(host);
-      }
-      lastTabSelected = false;
-    } else {
-      if (host.parentElement !== shelf) {
-        shelf.appendChild(host);
-      }
-      host.classList.add("is-visible");
-      syncShelfChildrenVisibility(shelf, true);
-      setTimeout(() => {
-        if (isLyricsTabSelected() && shelf.isConnected) {
-          syncShelfChildrenVisibility(shelf, true);
-        }
-      }, 250);
-    }
-
-    if (!tabSelected && !fullscreenActive) {
-      return;
-    }
 
     const { title, artist, videoId } = getTrackInfo();
     const key = `${videoId || title}__${title}__${artist}`;
+
+    // Make the LIRIK tab the default view once per track.
+    if (autoTabDoneKey !== key && autoTabRequestedKey !== key) {
+      if (ensureLyricsTabSelected()) {
+        autoTabRequestedKey = key;
+      }
+    }
+    if (isLyricsTabSelected()) {
+      autoTabDoneKey = key;
+    }
+
+    const tabSelected = isLyricsTabSelected();
+    const shelf = document.querySelector("ytmusic-player-page ytmusic-description-shelf-renderer");
+
+    syncFullscreenBodyState(fullscreenActive);
 
     if (key !== activeTrackKey) {
       activeTrackKey = key;
@@ -801,14 +846,28 @@
       updateOffsetUI();
     }
 
+    // Keep the extension host inside the native lyrics shelf so the native
+    // lyrics can be hidden, which prevents duplicated lyric surfaces.
+    if (shelf && host.parentElement !== shelf) {
+      shelf.appendChild(host);
+    }
+    if (shelf) {
+      syncShelfChildrenVisibility(shelf, true);
+    } else if (host.parentElement !== document.body) {
+      syncShelfChildrenVisibility(host.parentElement, false);
+      document.body.appendChild(host);
+    }
+
     const tabJustSwitched = tabSelected && !lastTabSelected;
     lastTabSelected = tabSelected;
 
     const video = getVideoEl();
     const duration = video ? video.duration : 0;
     const cached = syncedLyricsCache.get(key);
+    const cacheExpired =
+      cached && cached.retryable && Date.now() - cached.at > FETCH_RETRY_COOLDOWN_MS;
 
-    if (!cached && fetchInFlightKey !== key) {
+    if ((!cached || cacheExpired) && fetchInFlightKey !== key) {
       fetchSyncedLyricsForTrack(key, title, artist, duration, shelf);
     }
 
@@ -821,7 +880,10 @@
         renderedTrackKey = `${key}::LOADING`;
         lyricsPane.innerHTML = `<div class="ytm-lyric-hint">Memuat lirik...</div>`;
         if (fsStage) fsStage.innerHTML = "";
+        lyricItems = [];
+        fsLyricItems = [];
       }
+      updateSurfaceVisibility(fullscreenActive, tabSelected);
       return;
     }
 
@@ -844,20 +906,20 @@
     }
 
     if (!baseTimed.length) {
-      if (shelf) syncShelfChildrenVisibility(shelf, false);
-      host.classList.remove("is-visible");
-      fsOverlay.classList.remove("is-visible");
+      lyricItems = [];
+      fsLyricItems = [];
       if (renderedTrackKey !== `${key}::NONE`) {
         renderedTrackKey = `${key}::NONE`;
         lyricsPane.innerHTML = `<div class="ytm-lyric-hint">Lirik tidak tersedia untuk lagu ini.</div>`;
         if (fsStage) fsStage.innerHTML = "";
       }
+      updateSurfaceVisibility(fullscreenActive, tabSelected);
       return;
     }
 
     const renderId = `${key}::${sourceName}`;
     if (!forceRefresh && !tabJustSwitched && renderedTrackKey === renderId && lyricItems.length > 0) {
-      fsOverlay.classList.toggle("is-visible", fullscreenActive && lyricItems.length > 0);
+      updateSurfaceVisibility(fullscreenActive, tabSelected);
       return;
     }
 
@@ -936,9 +998,9 @@
       fsStage.replaceChildren(fsFrag);
     }
 
-    fsOverlay.classList.toggle("is-visible", fullscreenActive && lyricItems.length > 0);
     activeIndex = -1;
     lastWindowStart = -1;
+    updateSurfaceVisibility(fullscreenActive, tabSelected);
     syncHighlight(true);
   }
 
